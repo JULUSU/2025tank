@@ -4,9 +4,7 @@ const { PRESET_UNITS } = require('./units');
 const { generatePoints, connectEdges, splitSides } = require('./map');
 const BalanceLogger = require('./balanceLogger');
 
-// --------- 图算法与工具 ---------
-
-// Dijkstra：边权 w（1..4），blockedNodes 为不可穿越节点集合（起点可例外）
+// ---------- 图算法 ----------
 function shortestPath(graph, start, goal, blockedNodes = new Set()){
   if (!graph || !graph.nodes || !graph.adj) return { cost: Infinity, path: [] };
   const dist = new Map(), prev = new Map();
@@ -43,7 +41,6 @@ function shortestPath(graph, start, goal, blockedNodes = new Set()){
   }
   return { cost: dist.get(goal), path };
 }
-
 function buildGraph(points, edges){
   const nodes = (points || []).map(p=>p.id);
   const adj = new Map();
@@ -54,8 +51,6 @@ function buildGraph(points, edges){
   }
   return { nodes, adj, edges: edges || [] };
 }
-
-// 检查路径是否整条在同一“路”（方向桶一致）
 function sameRoad(graph, path){
   if (!graph || !path || path.length < 2) return true;
   let dir = null;
@@ -69,15 +64,14 @@ function sameRoad(graph, path){
   return true;
 }
 
-// --------- 核心引擎 ---------
-
+// ---------- 引擎 ----------
 class GameEngine {
   constructor(io){
     this.io = io;
-    this.rooms = new Map(); // roomId -> room
+    this.rooms = new Map();
     this.logger = new BalanceLogger();
 
-    // 空房间延迟清理：60s 无人则删除
+    // 空房 60s 后清理
     setInterval(() => {
       const now = Date.now();
       for (const [id, room] of this.rooms){
@@ -89,7 +83,6 @@ class GameEngine {
   }
 
   attachSocket(socket){
-    // 房间列表
     socket.on('listRooms', ()=> {
       const list = [...this.rooms.values()].map(r => ({
         id: r.id, name: r.name, maxPlayers: r.maxPlayers,
@@ -98,7 +91,6 @@ class GameEngine {
       socket.emit('rooms', list);
     });
 
-    // 创建房间
     socket.on('createRoom', (payload, ack) => {
       try{
         const { name, maxPlayers, maxTotalScore, maxSingleScore, mapSize } = payload || {};
@@ -110,7 +102,6 @@ class GameEngine {
       }
     });
 
-    // 加入房间
     socket.on('joinRoom', (payload, ack) => {
       const { roomId, faction } = payload || {};
       const room = this.rooms.get(roomId);
@@ -130,7 +121,7 @@ class GameEngine {
         damageDealt: 0
       };
       room.players.push(player);
-      room._emptySince = null; // 有人加入，清空“空房计时”
+      room._emptySince = null;
 
       socket.join(room.id);
       this.syncRoom(room.id);
@@ -138,7 +129,6 @@ class GameEngine {
       this.broadcastRooms();
     });
 
-    // 离开房间
     socket.on('leaveRoom', (payload) => {
       const { roomId } = payload || {};
       const room = this.rooms.get(roomId);
@@ -147,17 +137,17 @@ class GameEngine {
       room.players = room.players.filter(p=>p.socketId!==socket.id);
 
       if (room.players.length===0){
-        room._emptySince = Date.now(); // 延迟清理
+        room._emptySince = Date.now();
       }else if (before !== room.players.length){
         if (room.hostSocketId === socket.id){
-          room.hostSocketId = room.players[0].socketId; // 迁移房主
+          room.hostSocketId = room.players[0].socketId;
         }
         this.syncRoom(roomId);
       }
       this.broadcastRooms();
     });
 
-    // 开始游戏（仅房主）
+    // 开局（仅房主）
     socket.on('startGame', ({ roomId } = {}, ack) => {
       const room = this.rooms.get(roomId);
       if (!room) return ack && ack({ ok:false, error:'房间不存在' });
@@ -167,7 +157,7 @@ class GameEngine {
       const N = Math.min(200, Math.max(20, room.mapSize|0));
       room.points = generatePoints(N);
       room.edges  = connectEdges(room.points, 3 + Math.floor(Math.random()*2));
-      room.sides  = splitSides(room.points);
+      room.sides  = splitSides(room.points);   // 仍生成，但不再用于放置限制
       room.graph  = buildGraph(room.points, room.edges);
 
       room.started = true;
@@ -175,22 +165,22 @@ class GameEngine {
       room.turnOrder = [];
       room.curTurnIndex = 0;
       room.actionsTaken = new Set();
-      room.unitAt = new Map(); // nodeId -> unitId
-      room.units = new Map();  // unitId -> unit
+      room.unitAt = new Map();
+      room.units = new Map();
       room.killedAt = [];
 
       this.syncRoom(roomId);
       ack && ack({ ok:true });
     });
 
-    // 获取单位列表
+    // 单位列表
     socket.on('getUnitList', ({ roomId } = {}, ack) => {
       const room = this.rooms.get(roomId);
       if (!room) return ack && ack({ ok:false, error:'房间不存在' });
       ack && ack({ ok:true, units: PRESET_UNITS, maxSingle: room.maxSingleScore, maxTotal: room.maxTotalScore });
     });
 
-    // 选单位（校验单个分与总分上限）
+    // 选单位（返回生成的 unitId，供前端逐个放置）
     socket.on('selectUnits', ({ roomId, picks } = {}, ack) => {
       const room = this.rooms.get(roomId);
       if (!room || !room.started) return ack && ack({ ok:false, error:'房间不存在或未开始' });
@@ -221,10 +211,14 @@ class GameEngine {
       player.placed = false;
 
       this.syncRoom(roomId);
-      ack && ack({ ok:true, total });
+      ack && ack({
+        ok:true,
+        total,
+        units: player.units.map(u => ({ id:u.id, name:u.name, img:u.img, hp:u.hp, atk:u.atk, range:u.range, speed:u.speed, score:u.score }))
+      });
     });
 
-    // 放置单位（首个在己方半区，之后必须邻接己方已放单位）
+    // 放置单位（不再有“己方半区”限制；支持多次调用）
     socket.on('placeUnits', ({ roomId, placements } = {}, ack) => {
       const room = this.rooms.get(roomId);
       if (!room || !room.started) return ack && ack({ ok:false, error:'房间不存在或未开始' });
@@ -233,27 +227,26 @@ class GameEngine {
       if (!player.units?.length) return ack && ack({ ok:false, error:'尚未选择单位' });
 
       const ownedIds = new Set(player.units.map(u=>u.id));
-      let firstPlaced = false;
-      let ownedPlacedNodes = new Set();
 
+      // 已放置的己方节点
+      const existingPlacedNodes = new Set(player.units.filter(u=>u.node!=null).map(u=>u.node));
+      let ownedPlacedNodes = new Set(existingPlacedNodes);
+
+      // 校验：不可与已占节点冲突；首个随意，其后需与己方已落相邻（若你也要取消相邻，删掉相邻检查块即可）
       for (const pl of (placements||[])){
         const { unitId, nodeId } = pl || {};
         if (!ownedIds.has(unitId)) return ack && ack({ ok:false, error:'非法单位' });
         if (room.unitAt.get(nodeId)) return ack && ack({ ok:false, error:'目标点被占据' });
 
-        const side = room.sides[nodeId];
-        const needSide = player.faction==='A' ? 'A' : 'B';
-        if (!firstPlaced){
-          if (side !== needSide) return ack && ack({ ok:false, error:'首个单位必须在己方半区' });
-        }else{
-          // 必须与已放置节点相邻
+        // —— 相邻校验（如需移除相邻规则，删掉此块 7 行）——
+        if (ownedPlacedNodes.size > 0){
           const ok = (room.graph.adj.get(nodeId)||[]).some(e => {
             const v = (e.a===nodeId)? e.b : e.a;
             return ownedPlacedNodes.has(v);
           });
-          if (!ok) return ack && ack({ ok:false, error:'必须与已放置单位相邻' });
+          if (!ok) return ack && ack({ ok:false, error:'必须与己方已落单位相邻' });
         }
-        firstPlaced = true;
+        // 更新“已落集合”，保证同一次批量内也能连着放
         ownedPlacedNodes.add(nodeId);
       }
 
@@ -266,16 +259,19 @@ class GameEngine {
         room.unitAt.set(pl.nodeId, u.id);
         room.units.set(u.id, u);
       }
-      player.placed = true;
+
+      // 只有当该玩家所有单位都落位，才视为 placed 完成
+      const allPlaced = player.units.every(u=>u.node!=null);
+      player.placed = allPlaced;
 
       // 全员放置完毕 -> 决定回合顺序（总分低者先）
-      if (room.players.every(p=>p.placed)){
+      if (room.players.length > 0 && room.players.every(p=>p.placed)){
         room.turnOrder = [...room.players].sort((a,b)=>a.totalScore - b.totalScore).map(p=>p.id);
         room.curTurnIndex = 0;
       }
 
       this.syncRoom(roomId);
-      ack && ack({ ok:true });
+      ack && ack({ ok:true, allPlaced });
     });
 
     // 结束回合（仅当前手）
@@ -296,7 +292,7 @@ class GameEngine {
       ack && ack({ ok:true });
     });
 
-    // 单位行动：move 或 attack（每单位每回合一次）
+    // 行动
     socket.on('unitAction', ({ roomId, unitId, action, toNode, targetUnitId } = {}, ack) => {
       const room = this.rooms.get(roomId);
       if (!room || !room.started) return ack && ack({ ok:false });
@@ -315,16 +311,11 @@ class GameEngine {
         if (room.unitAt.get(toNode)) return ack && ack({ ok:false, error:'目标被占据' });
 
         const occupied = new Set([...room.unitAt.keys()]);
-        occupied.delete(unit.node); // 起点允许占据
+        occupied.delete(unit.node);
         const sp = shortestPath(room.graph, unit.node, toNode, occupied);
         if (!sp.path.length || sp.cost===Infinity) return ack && ack({ ok:false, error:'不可达' });
+        if (sp.cost > unit.speed * 4) return ack && ack({ ok:false, error:'超出速度可达范围' });
 
-        // 距离与速度比较（速度*4 作为一回合可移动的边权阈值）
-        if (sp.cost > unit.speed * 4){
-          return ack && ack({ ok:false, error:'超出速度可达范围' });
-        }
-
-        // 执行移动
         room.unitAt.delete(unit.node);
         unit.node = toNode;
         room.unitAt.set(unit.node, unit.id);
@@ -344,14 +335,10 @@ class GameEngine {
         if (!sp.path.length) return ack && ack({ ok:false, error:'不可达' });
 
         let inRange = false;
-        if (sameRoad(room.graph, sp.path)){
-          inRange = sp.cost <= unit.range; // 直线使用单位射程
-        }else{
-          inRange = sp.cost <= 1; // 转弯则当作相邻攻击
-        }
+        if (sameRoad(room.graph, sp.path)) inRange = sp.cost <= unit.range;
+        else inRange = sp.cost <= 1;
         if (!inRange) return ack && ack({ ok:false, error:'不在射程内或不可转弯' });
 
-        // 结算伤害
         target.hpCur -= unit.atk;
         player.damageDealt += unit.atk;
         this.logger.logUnitEvent({ type:'attack', roomId, attacker:unitId, target:targetUnitId, dmg: unit.atk });
@@ -361,7 +348,6 @@ class GameEngine {
           room.units.delete(target.id);
           room.killedAt.push({ unitId: target.id, owner: target.owner, faction: target.faction, turn: room.turn });
 
-          // 阵营存活检测
           const aliveA = [...room.units.values()].some(u=>u.faction==='A');
           const aliveB = [...room.units.values()].some(u=>u.faction==='B');
           if (!aliveA || !aliveB){
@@ -378,17 +364,17 @@ class GameEngine {
       return ack && ack({ ok:false, error:'未知动作' });
     });
 
-    // 断线处理：不立即删除空房，留 60s 缓冲
+    // 断线：延迟清房
     socket.on('disconnect', () => {
       for (const room of this.rooms.values()){
         const before = room.players.length;
         room.players = room.players.filter(p=>p.socketId!==socket.id);
 
         if (room.players.length === 0){
-          room._emptySince = Date.now(); // 延迟清理
+          room._emptySince = Date.now();
         }else if (before !== room.players.length){
           if (room.hostSocketId === socket.id){
-            room.hostSocketId = room.players[0].socketId; // 迁移房主
+            room.hostSocketId = room.players[0].socketId;
           }
           this.syncRoom(room.id);
         }
@@ -407,7 +393,7 @@ class GameEngine {
       maxTotalScore: Math.max(200, opts.maxTotalScore|0 || 1000),
       maxSingleScore: Math.max(100, opts.maxSingleScore|0 || 600),
       mapSize: Math.min(200, Math.max(20, opts.mapSize|0 || 80)),
-      // 初始化所有运行期字段，避免 lobby 阶段 undefined
+      // 初始化避免 lobby 阶段 undefined
       players: [],
       started: false,
       turn: 0,
@@ -443,12 +429,9 @@ class GameEngine {
     this.io.to(room.id).emit('matchOver', stats);
   }
 
-  // 构造“可见状态”（雾隐：敌方不暴露 node）
   buildVisibleState(roomId, forSocketId){
     const room = this.rooms.get(roomId);
     if (!room) return null;
-
-    // 防御：确保关键容器存在
     if (!(room.units instanceof Map)) room.units = new Map();
     if (!Array.isArray(room.turnOrder)) room.turnOrder = [];
     if (typeof room.curTurnIndex !== 'number') room.curTurnIndex = 0;
@@ -491,7 +474,6 @@ class GameEngine {
       if (state) this.io.to(p.socketId).emit('roomState', state);
     }
   }
-
   broadcastRooms(){
     const list = [...this.rooms.values()].map(r => ({
       id: r.id, name: r.name, maxPlayers: r.maxPlayers, curPlayers: r.players.length, started: r.started

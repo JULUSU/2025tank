@@ -1,23 +1,17 @@
+// public/game.js
 window.Game = (function(){
   const cvs = document.getElementById('canvas');
   const ctx = cvs.getContext('2d');
 
-  let state = null;      // 服务器下发的 roomState（雾隐）
-  let myPlayerId = null; // 服务端 ack 返回
+  let state = null;
+  let myPlayerId = null;
   let myRoomId = null;
 
   const logPane = document.getElementById('log');
   function log(msg){ logPane.textContent += msg + '\n'; logPane.scrollTop = logPane.scrollHeight; }
 
-  function setIdentifiers({ playerId, roomId }){
-    myPlayerId = playerId; myRoomId = roomId;
-  }
-
-  function setState(s){
-    state = s;
-    draw();
-    updateHUD();
-  }
+  function setIdentifiers({ playerId, roomId }){ myPlayerId = playerId; myRoomId = roomId; }
+  function setState(s){ state = s; draw(); updateHUD(); }
 
   function updateHUD(){
     const tinfo = document.getElementById('turn-info');
@@ -35,26 +29,34 @@ window.Game = (function(){
     const W = cvs.width - pad*2, H = cvs.height - pad*2;
     return { x: pad + (p.x+1)/2*W, y: pad + (p.y+1)/2*H };
   }
+  const Images = (function(){
+    const map = new Map();
+    function get(src){
+      if (!src) return null;
+      if (map.has(src)) return map.get(src);
+      const img = new Image(); img.src = src; map.set(src, img); return img;
+    }
+    return { get };
+  })();
 
-  // 交互选择
+  function isPlacementPhase(){
+    return !!(state?.started && (!state.turnOrder || state.turnOrder.length===0));
+  }
+
+  // 交互
   let selectedUnitId = null;
-  let hoverNodeId = null;
 
   function draw(){
     ctx.clearRect(0,0,cvs.width,cvs.height);
     if (!state) return;
-    // 背景
     ctx.fillStyle = '#0a0d12'; ctx.fillRect(0,0,cvs.width,cvs.height);
 
-    // 画边（线）
     if (state.map?.edges && state.map?.points){
       for (const e of state.map.edges){
         const a = state.map.points[e.a], b = state.map.points[e.b];
         const A = toScreen(a), B = toScreen(b);
-        ctx.strokeStyle = '#2a3342';
-        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#2a3342'; ctx.lineWidth = 2;
         ctx.beginPath(); ctx.moveTo(A.x,A.y); ctx.lineTo(B.x,B.y); ctx.stroke();
-        // 长度>1加小刻度点
         if (e.w > 1){
           const n = e.w-1;
           for (let i=1;i<=n;i++){
@@ -66,8 +68,6 @@ window.Game = (function(){
         }
       }
     }
-
-    // 画点（地点）
     if (state.map?.points){
       for (const p of state.map.points){
         const S = toScreen(p);
@@ -76,71 +76,44 @@ window.Game = (function(){
         ctx.strokeStyle = '#3a465a'; ctx.lineWidth = 2; ctx.stroke();
       }
     }
-
-    // 我方/敌方单位（敌方隐藏 node=null）
     if (state.units){
       for (const u of state.units){
-        if (u.node==null) continue; // 敌方不可见
-        const p = state.map.points[u.node];
-        if (!p) continue;
+        if (u.node==null) continue; // 敌方在雾隐下看不到位置
+        const p = state.map.points[u.node]; if (!p) continue;
         const S = toScreen(p);
 
-        // 单位底座
         ctx.fillStyle = (u.faction==='A') ? '#2a79ff' : '#e85b5b';
         ctx.beginPath(); ctx.arc(S.x,S.y,16,0,Math.PI*2); ctx.fill();
 
-        // 单位贴图（用图片或简替）
         const img = Images.get(u.img);
-        if (img){
-          ctx.drawImage(img, S.x-18, S.y-18, 36,36);
-        }else{
-          ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(S.x,S.y,12,0,Math.PI*2); ctx.fill();
-        }
+        if (img) ctx.drawImage(img, S.x-18, S.y-18, 36,36);
+        else { ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(S.x,S.y,12,0,Math.PI*2); ctx.fill(); }
 
-        // 血条
         const w = 28, h=5;
         const ratio = Math.max(0, u.hpCur / u.hp);
         ctx.fillStyle = '#111'; ctx.fillRect(S.x-w/2, S.y-26, w, h);
         ctx.fillStyle = ratio>0.5?'#1ec28b':(ratio>0.2?'#e8c85b':'#e85b5b');
         ctx.fillRect(S.x-w/2, S.y-26, w*ratio, h);
 
-        // 高亮所选
         if (u.id === selectedUnitId){
-          ctx.strokeStyle = '#ffd166';
-          ctx.lineWidth = 3;
+          ctx.strokeStyle = '#ffd166'; ctx.lineWidth = 3;
           ctx.beginPath(); ctx.arc(S.x,S.y,20,0,Math.PI*2); ctx.stroke();
         }
       }
     }
   }
 
-  // 预加载单位图（SVG）
-  const Images = (function(){
-    const map = new Map();
-    function get(src){
-      if (!src) return null;
-      if (map.has(src)) return map.get(src);
-      const img = new Image();
-      img.src = src;
-      map.set(src, img);
-      return img;
-    }
-    return { get };
-  })();
-
-  // 点击交互：先点单位，再点目标点 => move；先点单位，再点敌单位 => attack
   cvs.addEventListener('click', (e)=>{
-    if (!state?.started) return;
+    if (!state) return;
     const rect = cvs.getBoundingClientRect();
     const x = e.clientX - rect.left, y = e.clientY - rect.top;
 
-    // 命中检测：先查单位（优先）
+    // 命中
     let hitUnit = null, hitNode = null;
     if (state.units){
       for (const u of state.units){
         if (u.node==null) continue;
-        const p = state.map.points[u.node];
-        const S = toScreen(p);
+        const p = state.map.points[u.node]; const S = toScreen(p);
         if (Math.hypot(S.x-x, S.y-y) <= 18){ hitUnit = u; break; }
       }
     }
@@ -151,22 +124,40 @@ window.Game = (function(){
       }
     }
 
-    const meFaction = state.players.find(p=>p.id===window.Client.myPlayerId)?.faction || 'A';
+    // 放置阶段：点击空节点依次放置
+    if (isPlacementPhase()){
+      if (hitNode!=null){
+        const q = window.Client.pendingUnits || [];
+        const i = window.Client.placeCursor|0;
+        if (q[i]){
+          const unitId = q[i].id;
+          Net.emit('placeUnits', { roomId: myRoomId, placements: [{ unitId, nodeId: hitNode }] }, (res)=>{
+            if (!res?.ok){ log(`放置失败：${res?.error||'未知'}`); return; }
+            window.Client.placeCursor = i + 1;
+            log(`已放置 ${i+1}/${q.length}`);
+          });
+        }else{
+          log('你已放置完全部单位。');
+        }
+      }
+      return; // 放置阶段不进行选中/战斗
+    }
 
+    // 战斗阶段交互
+    if (!state?.started) return;
+
+    const meFaction = state.players.find(p=>p.id===myPlayerId)?.faction || 'A';
     if (!selectedUnitId){
       if (hitUnit && hitUnit.faction===meFaction){
         selectedUnitId = hitUnit.id; draw();
       }
       return;
     }else{
-      // 已选中己方单位
       if (hitUnit){
         if (hitUnit.faction !== meFaction){
-          // 攻击
           window.Client.attack(selectedUnitId, hitUnit.id);
           selectedUnitId = null;
         }else{
-          // 改选
           selectedUnitId = hitUnit.id;
         }
         draw();

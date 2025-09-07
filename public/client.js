@@ -1,10 +1,13 @@
+// public/client.js
 (function(){
   const { S } = UI;
 
-  // --- 全局标识（由服务器 ack 设置） ---
+  // --- 全局标识 & 放置队列 ---
   window.Client = {
     myPlayerId: null,
     myRoomId: null,
+    pendingUnits: [],   // ACK 返回的待放置单位列表（含 id）
+    placeCursor: 0,
     move(unitId, nodeId){
       Net.emit('unitAction', { roomId:this.myRoomId, unitId, action:'move', toNode: nodeId }, (res)=>{
         if (!res?.ok) Game.log(`移动失败：${res?.error||'未知'}`); 
@@ -18,9 +21,7 @@
   };
 
   // --- 房间列表 ---
-  function refreshRooms(){
-    Net.emit('listRooms');
-  }
+  function refreshRooms(){ Net.emit('listRooms'); }
   Net.on('rooms', (list) => {
     S.roomList.innerHTML = '';
     list.forEach(r => {
@@ -67,7 +68,6 @@
     S.menu.classList.add('hidden');
     S.lobby.classList.remove('hidden');
 
-    // 请求单位列表
     Net.emit('getUnitList', { roomId }, (ack)=>{
       if (!ack?.ok) return;
       renderUnitPicks(ack.units, ack.maxSingle, ack.maxTotal);
@@ -105,21 +105,20 @@
       if (total > maxTotal) return alert('超过最大单位总分');
       Net.emit('selectUnits', { roomId: window.Client.myRoomId, picks: pickKeys }, (ack)=>{
         if (!ack?.ok) return alert(ack.error||'提交失败');
-        alert('已提交阵容：' + ack.total);
+        window.Client.pendingUnits = ack.units || [];
+        window.Client.placeCursor = 0;
+        alert(`已提交阵容：${ack.total} 分，共 ${window.Client.pendingUnits.length} 个单位。\n进入地图后点击空节点依次放置。`);
       });
     };
   }
-
-  function computeTotal(units, keys){
-    return keys.reduce((s,k)=> s + (units[k]?.score||0), 0);
-  }
+  function computeTotal(units, keys){ return keys.reduce((s,k)=> s + (units[k]?.score||0), 0); }
   function updatePickTotal(units, maxTotal){
     const t = computeTotal(units, pickKeys);
     S.pickTotal.textContent = t;
-    if (t>maxTotal) S.pickTotal.style.color = '#e85b5b'; else S.pickTotal.style.color = '#eaeef3';
+    S.pickTotal.style.color = t>maxTotal ? '#e85b5b' : '#eaeef3';
   }
 
-  // --- 房主开始游戏 / 离开房间 ---
+  // --- 房主开始 / 离开 ---
   S.btnStart.onclick = ()=> {
     Net.emit('startGame', { roomId: window.Client.myRoomId }, (ack)=>{
       if (!ack?.ok) return alert(ack.error||'开始失败');
@@ -130,37 +129,32 @@
     location.reload();
   };
 
-  // --- 服务器状态同步（雾隐可见态） ---
+  // --- 状态同步 ---
   Net.on('roomState', (state)=>{
-    // 切屏：当 started==true -> 进入游戏画面；否则停留大厅
     if (state.started){
       document.getElementById('lobby').classList.add('hidden');
       document.getElementById('game').classList.remove('hidden');
-
-      // 首次开始后：提示玩家去地图上放置单位（按规则）
-      Game.log('提示：在己方半区选择首个单位落点，之后每个新单位必须与己方已落单位相邻。');
+      if (!state.turnOrder || state.turnOrder.length===0){
+        Game.log('提示：点击任意空节点放置你的单位；之后每个新单位需与己方已落单位相邻。');
+      }
     }
-    // 更新房间信息
     UI.S.lobbyInfo.textContent = `房间【${state.name}】玩家：` + state.players.map(p=>`${p.name}(${p.faction})${p.placed?'✅':''}`).join('，');
-
     Game.setState(state);
     Game.draw();
   });
 
-  // --- 结束回合按钮 ---
+  // --- 结束回合 ---
   document.getElementById('btn-endturn').onclick = () => {
     Net.emit('endTurn', { roomId: window.Client.myRoomId }, (ack)=>{
       if (!ack?.ok) Game.log(`结束失败：${ack?.error||'未知'}`);
     });
   };
 
-  // --- 比赛结束 ---
   Net.on('matchOver', (stats) => {
     Game.log(`比赛结束，胜者：${stats.winner} | 回合数：${stats.turns} | A伤害:${stats.damageA} | B伤害:${stats.damageB}`);
     alert('比赛结束！查看日志区统计。');
   });
 
-  // 初次载入拉取房间列表
   refreshRooms();
   setInterval(refreshRooms, 3000);
 })();
