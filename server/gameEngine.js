@@ -8,9 +8,10 @@ const BalanceLogger = require('./balanceLogger');
 
 // Dijkstra：边权 w（1..4），blockedNodes 为不可穿越节点集合（起点可例外）
 function shortestPath(graph, start, goal, blockedNodes = new Set()){
+  if (!graph || !graph.nodes || !graph.adj) return { cost: Infinity, path: [] };
   const dist = new Map(), prev = new Map();
-  const Q = new Set(graph.nodes);
-  graph.nodes.forEach(n => dist.set(n, Infinity));
+  const Q = new Set(graph.nodes || []);
+  (graph.nodes || []).forEach(n => dist.set(n, Infinity));
   dist.set(start, 0);
 
   while (Q.size){
@@ -23,9 +24,9 @@ function shortestPath(graph, start, goal, blockedNodes = new Set()){
     Q.delete(u);
     if (u === goal) break;
 
-    for (const e of graph.adj.get(u) || []){
+    for (const e of (graph.adj.get(u) || [])){
       const v = (e.a === u) ? e.b : e.a;
-      if (v !== start && blockedNodes.has(v)) continue; // 不能穿过被占节点（起点允许）
+      if (v !== start && blockedNodes.has(v)) continue;
       const alt = dist.get(u) + e.w;
       if (alt < dist.get(v)){
         dist.set(v, alt);
@@ -33,7 +34,7 @@ function shortestPath(graph, start, goal, blockedNodes = new Set()){
       }
     }
   }
-  if (dist.get(goal) === Infinity) return { cost: Infinity, path: [] };
+  if (!dist.has(goal) || dist.get(goal) === Infinity) return { cost: Infinity, path: [] };
   const path = [];
   let cur = goal;
   while (cur !== undefined){
@@ -44,19 +45,19 @@ function shortestPath(graph, start, goal, blockedNodes = new Set()){
 }
 
 function buildGraph(points, edges){
-  const nodes = points.map(p=>p.id);
+  const nodes = (points || []).map(p=>p.id);
   const adj = new Map();
   for (const id of nodes) adj.set(id, []);
-  for (const e of edges){
+  for (const e of (edges || [])){
     adj.get(e.a).push(e);
     adj.get(e.b).push(e);
   }
-  return { nodes, adj, edges };
+  return { nodes, adj, edges: edges || [] };
 }
 
 // 检查路径是否整条在同一“路”（方向桶一致）
 function sameRoad(graph, path){
-  if (path.length < 2) return true;
+  if (!graph || !path || path.length < 2) return true;
   let dir = null;
   for (let i=0;i<path.length-1;i++){
     const a = path[i], b = path[i+1];
@@ -129,7 +130,7 @@ class GameEngine {
         damageDealt: 0
       };
       room.players.push(player);
-      room._emptySince = null; // 有人加入，清除“空房计时”
+      room._emptySince = null; // 有人加入，清空“空房计时”
 
       socket.join(room.id);
       this.syncRoom(room.id);
@@ -284,7 +285,7 @@ class GameEngine {
       const player = room.players.find(p=>p.socketId===socket.id);
       if (!player) return ack && ack({ ok:false });
 
-      const curPlayerId = room.turnOrder[room.curTurnIndex];
+      const curPlayerId = (room.turnOrder || [])[room.curTurnIndex] || null;
       if (player.id !== curPlayerId) return ack && ack({ ok:false, error:'未到你的回合' });
 
       room.actionsTaken.clear();
@@ -302,7 +303,7 @@ class GameEngine {
       const player = room.players.find(p=>p.socketId===socket.id);
       if (!player) return ack && ack({ ok:false });
 
-      const curPlayerId = room.turnOrder[room.curTurnIndex];
+      const curPlayerId = (room.turnOrder || [])[room.curTurnIndex] || null;
       if (player.id !== curPlayerId) return ack && ack({ ok:false, error:'未到你的回合' });
 
       const unit = room.units.get(unitId);
@@ -339,7 +340,7 @@ class GameEngine {
         const target = room.units.get(targetUnitId);
         if (!target || target.faction === unit.faction) return ack && ack({ ok:false, error:'非法目标' });
 
-        const sp = shortestPath(room.graph, unit.node, target.node, new Set()); // 攻击仅看是否直线与距离
+        const sp = shortestPath(room.graph, unit.node, target.node, new Set());
         if (!sp.path.length) return ack && ack({ ok:false, error:'不可达' });
 
         let inRange = false;
@@ -406,8 +407,20 @@ class GameEngine {
       maxTotalScore: Math.max(200, opts.maxTotalScore|0 || 1000),
       maxSingleScore: Math.max(100, opts.maxSingleScore|0 || 600),
       mapSize: Math.min(200, Math.max(20, opts.mapSize|0 || 80)),
+      // 初始化所有运行期字段，避免 lobby 阶段 undefined
       players: [],
       started: false,
+      turn: 0,
+      turnOrder: [],
+      curTurnIndex: 0,
+      actionsTaken: new Set(),
+      units: new Map(),
+      unitAt: new Map(),
+      points: [],
+      edges: [],
+      sides: {},
+      graph: buildGraph([], []),
+      killedAt: [],
       _emptySince: null
     };
     this.rooms.set(id, room);
@@ -434,6 +447,12 @@ class GameEngine {
   buildVisibleState(roomId, forSocketId){
     const room = this.rooms.get(roomId);
     if (!room) return null;
+
+    // 防御：确保关键容器存在
+    if (!(room.units instanceof Map)) room.units = new Map();
+    if (!Array.isArray(room.turnOrder)) room.turnOrder = [];
+    if (typeof room.curTurnIndex !== 'number') room.curTurnIndex = 0;
+
     const me = room.players.find(p=>p.socketId===forSocketId);
     const myFaction = me?.faction || 'A';
     const visibleUnits = [];
@@ -456,7 +475,7 @@ class GameEngine {
       started: room.started,
       turn: room.turn,
       turnOrder: room.turnOrder,
-      curTurn: room.turnOrder[room.curTurnIndex] || null,
+      curTurn: (room.turnOrder || [])[room.curTurnIndex] || null,
       players: room.players.map(p=>({ id:p.id, name:p.name, faction:p.faction, placed:p.placed, totalScore:p.totalScore, damageDealt:p.damageDealt })),
       limits: { maxPlayers: room.maxPlayers, maxTotalScore: room.maxTotalScore, maxSingleScore: room.maxSingleScore },
       map: { points: room.points, edges: room.edges, sides: room.sides },
@@ -469,7 +488,7 @@ class GameEngine {
     if (!room) return;
     for (const p of room.players){
       const state = this.buildVisibleState(roomId, p.socketId);
-      this.io.to(p.socketId).emit('roomState', state);
+      if (state) this.io.to(p.socketId).emit('roomState', state);
     }
   }
 
