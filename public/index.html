@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Graph Tactics</title>
+  <link rel="stylesheet" href="/style.css"/>
+</head>
+<body>
+  <div id="app">
+    <section id="menu">
+      <h1>图点战术 | Graph Tactics</h1>
+
+      <div class="card">
+        <h2>创建服务器</h2>
+        <label>服务器名称 <input id="r-name" placeholder="我的房间"/></label>
+        <label>人数（2-8） <input id="r-maxPlayers" type="number" min="2" max="8" value="2"/></label>
+        <label>最大单位总分 <input id="r-maxTotal" type="number" value="1000"/></label>
+        <label>最大单个单位分 <input id="r-maxSingle" type="number" value="600"/></label>
+        <label>地图地点数量（<=200） <input id="r-mapSize" type="number" value="80"/></label>
+        <button id="btn-create">创建服务器</button>
+      </div>
+
+      <div class="card">
+        <h2>加入服务器</h2>
+        <label>选择阵营
+          <select id="join-faction">
+            <option value="A">阵营A</option>
+            <option value="B">阵营B</option>
+          </select>
+        </label>
+        <div id="room-list"></div>
+      </div>
+    </section>
+
+    <section id="lobby" class="hidden">
+      <h2>房间大厅</h2>
+      <div id="lobby-info"></div>
+      <div id="unit-pick" class="card">
+        <h3>选择单位（受分数限制）</h3>
+        <div id="units"></div>
+        <div>总分：<span id="pick-total">0</span> / <span id="pick-max">0</span></div>
+        <button id="btn-submit-picks">提交阵容</button>
+      </div>
+      <div class="card">
+        <button id="btn-start" class="primary">房主开始游戏</button>
+        <button id="btn-leave">离开房间</button>
+      </div>
+    </section>
+
+    <section id="game" class="hidden">
+      <canvas id="canvas" width="1200" height="800"></canvas>
+      <div id="hud" class="hud">
+        <div id="turn-info"></div>
+        <div id="action-panel">
+          <button id="btn-endturn">结束回合</button>
+        </div>
+        <div id="select-panel"></div>
+        <div id="log"></div>
+      </div>
+    </section>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/net.js"></script>
+  <script src="/ui.js"></script>
+  <script src="/game.js"></script>
+  <script src="/client.js"></script>
+</body>
+</html>
