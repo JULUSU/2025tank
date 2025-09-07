@@ -4,7 +4,7 @@ const { PRESET_UNITS } = require('./units');
 const { generatePoints, connectEdges, splitSides } = require('./map');
 const BalanceLogger = require('./balanceLogger');
 
-// ---------- 图算法 ----------
+// --------- 图算法 ---------
 function shortestPath(graph, start, goal, blockedNodes = new Set()){
   if (!graph || !graph.nodes || !graph.adj) return { cost: Infinity, path: [] };
   const dist = new Map(), prev = new Map();
@@ -64,7 +64,7 @@ function sameRoad(graph, path){
   return true;
 }
 
-// ---------- 引擎 ----------
+// --------- 引擎 ---------
 class GameEngine {
   constructor(io){
     this.io = io;
@@ -80,6 +80,20 @@ class GameEngine {
         }
       }
     }, 10_000);
+  }
+
+  // 所有人都放置完 -> 开始战斗
+  maybeStartBattle(room){
+    if (!room.started) return;
+    const enoughPlayers = room.players.length >= 2;
+    const everyoneReady = enoughPlayers && room.players.every(p =>
+      (p.units?.length || 0) > 0 && p.units.every(u => u.node != null)
+    );
+    if (everyoneReady && (!room.turnOrder || room.turnOrder.length === 0)){
+      room.turnOrder = [...room.players].sort((a,b)=>a.totalScore - b.totalScore).map(p=>p.id);
+      room.curTurnIndex = 0;
+      room.turn = 1;
+    }
   }
 
   attachSocket(socket){
@@ -157,7 +171,7 @@ class GameEngine {
       const N = Math.min(200, Math.max(20, room.mapSize|0));
       room.points = generatePoints(N);
       room.edges  = connectEdges(room.points, 3 + Math.floor(Math.random()*2));
-      room.sides  = splitSides(room.points);   // 仍生成，但不再用于放置限制
+      room.sides  = splitSides(room.points);   // 仍生成，但不用于放置限制
       room.graph  = buildGraph(room.points, room.edges);
 
       room.started = true;
@@ -180,7 +194,7 @@ class GameEngine {
       ack && ack({ ok:true, units: PRESET_UNITS, maxSingle: room.maxSingleScore, maxTotal: room.maxTotalScore });
     });
 
-    // 选单位（返回生成的 unitId，供前端逐个放置）
+    // 选单位
     socket.on('selectUnits', ({ roomId, picks } = {}, ack) => {
       const room = this.rooms.get(roomId);
       if (!room || !room.started) return ack && ack({ ok:false, error:'房间不存在或未开始' });
@@ -218,7 +232,7 @@ class GameEngine {
       });
     });
 
-    // 放置单位（不再有“己方半区”限制；支持多次调用）
+    // 放置单位（无半区限制；多次调用；全部放完才算 placed）
     socket.on('placeUnits', ({ roomId, placements } = {}, ack) => {
       const room = this.rooms.get(roomId);
       if (!room || !room.started) return ack && ack({ ok:false, error:'房间不存在或未开始' });
@@ -232,13 +246,12 @@ class GameEngine {
       const existingPlacedNodes = new Set(player.units.filter(u=>u.node!=null).map(u=>u.node));
       let ownedPlacedNodes = new Set(existingPlacedNodes);
 
-      // 校验：不可与已占节点冲突；首个随意，其后需与己方已落相邻（若你也要取消相邻，删掉相邻检查块即可）
       for (const pl of (placements||[])){
         const { unitId, nodeId } = pl || {};
         if (!ownedIds.has(unitId)) return ack && ack({ ok:false, error:'非法单位' });
         if (room.unitAt.get(nodeId)) return ack && ack({ ok:false, error:'目标点被占据' });
 
-        // —— 相邻校验（如需移除相邻规则，删掉此块 7 行）——
+        // —— 若你想取消“必须贴着己方已落单位”这一条，把下面这块删除即可 ——
         if (ownedPlacedNodes.size > 0){
           const ok = (room.graph.adj.get(nodeId)||[]).some(e => {
             const v = (e.a===nodeId)? e.b : e.a;
@@ -246,11 +259,9 @@ class GameEngine {
           });
           if (!ok) return ack && ack({ ok:false, error:'必须与己方已落单位相邻' });
         }
-        // 更新“已落集合”，保证同一次批量内也能连着放
         ownedPlacedNodes.add(nodeId);
       }
 
-      // 写入
       const byId = new Map(player.units.map(u=>[u.id,u]));
       for (const pl of (placements||[])){
         const u = byId.get(pl.unitId);
@@ -260,28 +271,26 @@ class GameEngine {
         room.units.set(u.id, u);
       }
 
-      // 只有当该玩家所有单位都落位，才视为 placed 完成
-      const allPlaced = player.units.every(u=>u.node!=null);
-      player.placed = allPlaced;
+      // 只要该玩家全部落位才 set placed
+      player.placed = player.units.every(u=>u.node!=null);
 
-      // 全员放置完毕 -> 决定回合顺序（总分低者先）
-      if (room.players.length > 0 && room.players.every(p=>p.placed)){
-        room.turnOrder = [...room.players].sort((a,b)=>a.totalScore - b.totalScore).map(p=>p.id);
-        room.curTurnIndex = 0;
-      }
+      // 所有人都 OK -> 战斗开始（生成先后手/当前手）
+      this.maybeStartBattle(room);
 
       this.syncRoom(roomId);
-      ack && ack({ ok:true, allPlaced });
+      ack && ack({ ok:true, allPlaced: player.placed, curTurn: (room.turnOrder||[])[room.curTurnIndex] || null });
     });
 
-    // 结束回合（仅当前手）
+    // 结束回合
     socket.on('endTurn', ({ roomId } = {}, ack) => {
       const room = this.rooms.get(roomId);
-      if (!room || !room.started) return ack && ack({ ok:false });
-      const player = room.players.find(p=>p.socketId===socket.id);
-      if (!player) return ack && ack({ ok:false });
+      if (!room || !room.started) return ack && ack({ ok:false, error:'游戏未开始' });
+      if (!room.turnOrder || room.turnOrder.length===0) return ack && ack({ ok:false, error:'仍在放置阶段，等待所有玩家放置完毕' });
 
-      const curPlayerId = (room.turnOrder || [])[room.curTurnIndex] || null;
+      const player = room.players.find(p=>p.socketId===socket.id);
+      if (!player) return ack && ack({ ok:false, error:'玩家不存在' });
+
+      const curPlayerId = room.turnOrder[room.curTurnIndex];
       if (player.id !== curPlayerId) return ack && ack({ ok:false, error:'未到你的回合' });
 
       room.actionsTaken.clear();
@@ -295,11 +304,13 @@ class GameEngine {
     // 行动
     socket.on('unitAction', ({ roomId, unitId, action, toNode, targetUnitId } = {}, ack) => {
       const room = this.rooms.get(roomId);
-      if (!room || !room.started) return ack && ack({ ok:false });
-      const player = room.players.find(p=>p.socketId===socket.id);
-      if (!player) return ack && ack({ ok:false });
+      if (!room || !room.started) return ack && ack({ ok:false, error:'游戏未开始' });
+      if (!room.turnOrder || room.turnOrder.length===0) return ack && ack({ ok:false, error:'仍在放置阶段' });
 
-      const curPlayerId = (room.turnOrder || [])[room.curTurnIndex] || null;
+      const player = room.players.find(p=>p.socketId===socket.id);
+      if (!player) return ack && ack({ ok:false, error:'玩家不存在' });
+
+      const curPlayerId = room.turnOrder[room.curTurnIndex];
       if (player.id !== curPlayerId) return ack && ack({ ok:false, error:'未到你的回合' });
 
       const unit = room.units.get(unitId);
@@ -393,7 +404,6 @@ class GameEngine {
       maxTotalScore: Math.max(200, opts.maxTotalScore|0 || 1000),
       maxSingleScore: Math.max(100, opts.maxSingleScore|0 || 600),
       mapSize: Math.min(200, Math.max(20, opts.mapSize|0 || 80)),
-      // 初始化避免 lobby 阶段 undefined
       players: [],
       started: false,
       turn: 0,

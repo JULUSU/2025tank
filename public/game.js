@@ -13,15 +13,29 @@ window.Game = (function(){
   function setIdentifiers({ playerId, roomId }){ myPlayerId = playerId; myRoomId = roomId; }
   function setState(s){ state = s; draw(); updateHUD(); }
 
+  function isPlacementPhase(){
+    return !!(state?.started && (!state.turnOrder || state.turnOrder.length===0));
+  }
+
   function updateHUD(){
     const tinfo = document.getElementById('turn-info');
+    const endBtn = document.getElementById('btn-endturn');
+
     if (!state?.started){
       tinfo.textContent = '等待开始或正在放置单位…';
+      endBtn.disabled = true;
+      return;
+    }
+    if (isPlacementPhase()){
+      tinfo.textContent = `回合 ${state.turn} | 放置阶段：等待所有玩家放置完单位`;
+      endBtn.disabled = true; // 放置阶段禁用结束回合
       return;
     }
     const me = state.players.find(p=>p.id===myPlayerId);
     const cur = state.curTurn;
-    tinfo.textContent = `回合 ${state.turn} | 当前手：${cur} ${cur===myPlayerId?'(你)':''} | 我方：${me?.faction}`;
+    const isMe = cur === myPlayerId;
+    tinfo.textContent = `回合 ${state.turn} | 当前手：${cur||'未知'} ${isMe?'(你)':''} | 我方：${me?.faction}`;
+    endBtn.disabled = !isMe;
   }
 
   function toScreen(p){
@@ -39,10 +53,6 @@ window.Game = (function(){
     return { get };
   })();
 
-  function isPlacementPhase(){
-    return !!(state?.started && (!state.turnOrder || state.turnOrder.length===0));
-  }
-
   // 交互
   let selectedUnitId = null;
 
@@ -51,6 +61,7 @@ window.Game = (function(){
     if (!state) return;
     ctx.fillStyle = '#0a0d12'; ctx.fillRect(0,0,cvs.width,cvs.height);
 
+    // 边
     if (state.map?.edges && state.map?.points){
       for (const e of state.map.edges){
         const a = state.map.points[e.a], b = state.map.points[e.b];
@@ -68,6 +79,7 @@ window.Game = (function(){
         }
       }
     }
+    // 点
     if (state.map?.points){
       for (const p of state.map.points){
         const S = toScreen(p);
@@ -76,9 +88,10 @@ window.Game = (function(){
         ctx.strokeStyle = '#3a465a'; ctx.lineWidth = 2; ctx.stroke();
       }
     }
+    // 单位（我方可见坐标，敌方隐藏）
     if (state.units){
       for (const u of state.units){
-        if (u.node==null) continue; // 敌方在雾隐下看不到位置
+        if (u.node==null) continue;
         const p = state.map.points[u.node]; if (!p) continue;
         const S = toScreen(p);
 
@@ -103,6 +116,7 @@ window.Game = (function(){
     }
   }
 
+  // 点击
   cvs.addEventListener('click', (e)=>{
     if (!state) return;
     const rect = cvs.getBoundingClientRect();
@@ -127,23 +141,23 @@ window.Game = (function(){
     // 放置阶段：点击空节点依次放置
     if (isPlacementPhase()){
       if (hitNode!=null){
-        const q = window.Client.pendingUnits || [];
+        const queue = (window.Client.pendingUnits || []);
         const i = window.Client.placeCursor|0;
-        if (q[i]){
-          const unitId = q[i].id;
+        if (queue[i]){
+          const unitId = queue[i].id;
           Net.emit('placeUnits', { roomId: myRoomId, placements: [{ unitId, nodeId: hitNode }] }, (res)=>{
             if (!res?.ok){ log(`放置失败：${res?.error||'未知'}`); return; }
             window.Client.placeCursor = i + 1;
-            log(`已放置 ${i+1}/${q.length}`);
+            log(`已放置 ${i+1}/${queue.length}`);
           });
         }else{
-          log('你已放置完全部单位。');
+          log('你已放置完全部单位；等待对手完成。');
         }
       }
-      return; // 放置阶段不进行选中/战斗
+      return;
     }
 
-    // 战斗阶段交互
+    // 战斗阶段
     if (!state?.started) return;
 
     const meFaction = state.players.find(p=>p.id===myPlayerId)?.faction || 'A';
